@@ -3,7 +3,7 @@ const { MongoClient } = require('mongodb');
 require('dotenv').config();
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
 const MONGO_URI = process.env.MONGO_URI;
 const API_KEY = process.env.API_KEY;
@@ -15,13 +15,16 @@ let client = null;
 // Connect to MongoDB
 async function connectDB() {
   try {
-    client = new MongoClient(MONGO_URI);
+    client = new MongoClient(MONGO_URI, {
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
+    });
     await client.connect();
     db = client.db('quantconnect');
     console.log('✅ Connected to MongoDB');
   } catch (error) {
     console.error('❌ MongoDB connection failed:', error.message);
-    process.exit(1);
+    // Don't exit - server can still start, just log errors for API calls
   }
 }
 
@@ -58,6 +61,10 @@ app.post('/api/insert', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Missing collection or document' });
     }
     
+    if (!db) {
+      return res.status(503).json({ error: 'MongoDB not connected' });
+    }
+    
     const result = await db.collection(collection).insertOne({
       ...document,
       createdAt: new Date()
@@ -82,6 +89,10 @@ app.post('/api/insert_many', authenticate, async (req, res) => {
     
     if (!collection || !documents || !Array.isArray(documents)) {
       return res.status(400).json({ error: 'Missing collection or documents array' });
+    }
+    
+    if (!db) {
+      return res.status(503).json({ error: 'MongoDB not connected' });
     }
     
     const docsWithTimestamp = documents.map(doc => ({
@@ -112,6 +123,10 @@ app.post('/api/query', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Missing collection' });
     }
     
+    if (!db) {
+      return res.status(503).json({ error: 'MongoDB not connected' });
+    }
+    
     const docs = await db.collection(collection)
       .find(filter)
       .limit(limit)
@@ -137,6 +152,10 @@ app.put('/api/update', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Missing collection, filter, or update' });
     }
     
+    if (!db) {
+      return res.status(503).json({ error: 'MongoDB not connected' });
+    }
+    
     const result = await db.collection(collection).updateOne(filter, { $set: update });
     
     console.log(`✅ Updated ${result.modifiedCount} document(s) in ${collection}`);
@@ -151,29 +170,6 @@ app.put('/api/update', authenticate, async (req, res) => {
   }
 });
 
-// Delete document
-app.delete('/api/delete', authenticate, async (req, res) => {
-  try {
-    const { collection, filter } = req.body;
-    
-    if (!collection || !filter) {
-      return res.status(400).json({ error: 'Missing collection or filter' });
-    }
-    
-    const result = await db.collection(collection).deleteOne(filter);
-    
-    console.log(`✅ Deleted ${result.deletedCount} document(s) from ${collection}`);
-    res.json({ 
-      success: true, 
-      deletedCount: result.deletedCount,
-      collection: collection
-    });
-  } catch (error) {
-    console.error('❌ Delete error:', error.message);
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // Error handler
 app.use((err, req, res, next) => {
   console.error('Server error:', err);
@@ -184,22 +180,29 @@ app.use((err, req, res, next) => {
 async function startServer() {
   await connectDB();
   
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n${'='.repeat(60)}`);
     console.log('🚀 MongoDB REST API Server Running');
     console.log(`${'='.repeat(60)}`);
-    console.log(`📍 Server: http://localhost:${PORT}`);
+    console.log(`📍 Server: http://0.0.0.0:${PORT}`);
     console.log(`🏥 Health: http://localhost:${PORT}/health`);
     console.log(`📚 Database: quantconnect`);
     console.log(`${'='.repeat(60)}\n`);
   });
+
+  // Handle graceful shutdown
+  process.on('SIGTERM', async () => {
+    console.log('\n🛑 Shutting down gracefully...');
+    server.close(async () => {
+      if (client) await client.close();
+      process.exit(0);
+    });
+  });
+
+  // Keep process alive
+  process.on('exit', async () => {
+    if (client) await client.close();
+  });
 }
 
 startServer().catch(console.error);
-
-// Graceful shutdown
-process.on('SIGINT', async () => {
-  console.log('\n🛑 Shutting down...');
-  if (client) await client.close();
-  process.exit(0);
-});
