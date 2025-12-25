@@ -7,6 +7,14 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
+// Log ALL incoming requests
+app.use((req, res, next) => {
+  console.log(`🌐 ${req.method} ${req.url} - ${new Date().toISOString()}`);
+  console.log(`   Headers:`, JSON.stringify(req.headers, null, 2));
+  console.log(`   Body preview:`, JSON.stringify(req.body).substring(0, 200));
+  next();
+});
+
 // Environment variables
 const MONGO_URI = process.env.MONGO_URI;
 const API_KEY = process.env.API_KEY;
